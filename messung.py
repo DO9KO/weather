@@ -1,8 +1,10 @@
-import adafruit_bme680
 import time
 import board
 import mysql.connector
 from datetime import datetime
+from smbus2 import SMBus
+from bmp280 import BMP280  # Import BMP280
+import adafruit_bme680
 from sensirion_i2c_driver import LinuxI2cTransceiver, I2cConnection, CrcCalculator
 from sensirion_i2c_adapter.i2c_channel import I2cChannel
 from sensirion_i2c_scd30.device import Scd30Device
@@ -31,6 +33,8 @@ cursor.execute("""
         humidity_scd30 FLOAT,
         temperature_scd30 FLOAT,
         co2_scd30 FLOAT,
+        bmp280_temperature FLOAT,  -- Add BMP280 temperature
+        bmp280_pressure FLOAT,     -- Add BMP280 pressure
         timestamp DATETIME
     )
 """)
@@ -42,6 +46,10 @@ bme680 = adafruit_bme680.Adafruit_BME680_I2C(i2c)
 
 # Set the location's sea level pressure in hPa
 bme680.sea_level_pressure = 1013.25
+
+# Initialize BMP280 sensor on I2C bus
+bus = SMBus(1)
+bmp280 = BMP280(i2c_dev=bus)
 
 # Initialize SCD30 sensor
 with LinuxI2cTransceiver('/dev/i2c-1') as i2c_transceiver:
@@ -59,7 +67,8 @@ with LinuxI2cTransceiver('/dev/i2c-1') as i2c_transceiver:
     # Display firmware version
     major, minor = sensor.read_firmware_version()
     print(f"Firmware version - Major: {major}, Minor: {minor}")
-
+    print(sensor.get_auto_calibration_status())
+    print(sensor.get_altitude_compensation())
     # Start periodic measurement on SCD30
     sensor.start_periodic_measurement(0)
 
@@ -71,29 +80,41 @@ with LinuxI2cTransceiver('/dev/i2c-1') as i2c_transceiver:
             humidity = bme680.relative_humidity
             pressure = bme680.pressure
             altitude = bme680.altitude
-            timestamp = datetime.now()
+
+            # Read data from BMP280
+            bmp280_temperature = bmp280.get_temperature()
+            bmp280_pressure = bmp280.get_pressure()
 
             # Read data from SCD30
             co2_concentration, temperature_scd, humidity_scd = sensor.blocking_read_measurement_data()
 
+            # Timestamp for data entry
+            timestamp = datetime.now()
+
             # Print sensor data for debugging
-            print("\nTemperature: %0.1f C" % temperature)
-            print("Gas: %d ohm" % gas)
-            print("Humidity: %0.1f %%" % humidity)
-            print("Pressure: %0.3f hPa" % pressure)
-            print("Altitude = %0.2f meters" % altitude)
+            print("\nBME680 Temperature: %0.1f C" % temperature)
+            print("BME680 Gas: %d ohm" % gas)
+            print("BME680 Humidity: %0.1f %%" % humidity)
+            print("BME680 Pressure: %0.3f hPa" % pressure)
+            print("BME680 Altitude = %0.2f meters" % altitude)
+            print("BMP280 Temperature: %0.1f C" % bmp280_temperature)
+            print("BMP280 Pressure: %0.3f hPa" % bmp280_pressure)
+            print("SCD30 CO2 Concentration: %0.1f ppm" % co2_concentration)
+            print("SCD30 Temperature: %0.1f C" % temperature_scd)
+            print("SCD30 Humidity: %0.1f %%" % humidity_scd)
             print("Timestamp: %s" % timestamp)
-            print(f"CO2 Concentration: {co2_concentration}, Temperature (SCD30): {temperature_scd}, Humidity (SCD30): {humidity_scd}")
 
             # Insert data into MySQL
             cursor.execute("""
-                INSERT INTO sensor_data (temperature, gas, humidity, pressure, altitude, humidity_scd30, temperature_scd30, co2_scd30, timestamp)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (temperature, gas, humidity, pressure, altitude, humidity_scd, temperature_scd, co2_concentration, timestamp))
+                INSERT INTO sensor_data (temperature, gas, humidity, pressure, altitude, humidity_scd30,
+                                         temperature_scd30, co2_scd30, bmp280_temperature, bmp280_pressure, timestamp)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (temperature, gas, humidity, pressure, altitude, humidity_scd, temperature_scd,
+                  co2_concentration, bmp280_temperature, bmp280_pressure, timestamp))
             conn.commit()
 
             # Wait before next reading
-            time.sleep(10)
+            time.sleep(30)
 
     except KeyboardInterrupt:
         print("Interrupted by user")
